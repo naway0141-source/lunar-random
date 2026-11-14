@@ -26,6 +26,9 @@
   button.act.primary { background:#b97f1f; border-color:#e0aa3e; color:#fff8ea; font-weight:bold; }
   .fric { display:flex; align-items:center; gap:8px; background:#141a33; border:1px solid #39406e; border-radius:10px; padding:5px 12px; font-size:13px; }
   .fric input { width:130px; accent-color:#ffd76a; }
+  .seg { display:inline-flex; background:#141a33; border:1px solid #39406e; border-radius:999px; overflow:hidden; }
+  .seg button { border:0; background:transparent; color:#e8ecff; padding:7px 13px; font-size:13.5px; cursor:pointer; font-family:inherit; }
+  .seg button.on { background:#b97f1f; color:#fff8ea; font-weight:bold; }
   canvas { width:100%; height:auto; display:block; margin:0 auto; touch-action:none; user-select:none; -webkit-user-select:none; }
   .msg { font-size:17px; font-weight:bold; min-height:1.5em; margin-top:8px; color:#ffd76a; }
   .hint { font-size:12.5px; opacity:.75; line-height:1.7; }
@@ -37,15 +40,20 @@
 <body>
 <div class="wrap">
   <h1><span class="moon">🌕</span> ルナーランダム</h1>
-  <p class="sub">月面ビリヤード。1面だけ普通の長方形、<b>2面からは外形が完全ランダム</b> ― 更新するたび二度と同じ形は出ません。<br>全部のボールをブラックホール（ポケット）に落とせばクリア。</p>
+  <p class="sub">月面ビリヤード。1面だけ普通の長方形、<b>2面からは外形が完全ランダム</b> ― 直線だけでなく<b>曲線の壁</b>も混ざります。<br>全部のボールをブラックホール（ポケット）に落とせばクリア。</p>
 
   <div class="hud">
     <div class="stat">STAGE <b id="stageNo">1</b></div>
     <div class="stat">残り <b id="left">6</b> 個</div>
     <div class="stat">ショット <b id="shots">0</b></div>
+    <div class="stat" id="targetStat" style="display:none">次の的 <b id="target">①</b></div>
     <div class="fric">フリクション <input type="range" id="fric" min="0" max="255" value="32"> <b id="fricVal">32</b></div>
   </div>
   <div class="hud">
+    <div class="seg" id="modeSeg">
+      <button data-m="free" class="on">フリー（順番なし）</button>
+      <button data-m="order">ナインボール（順番）</button>
+    </div>
     <button class="act" id="retryBtn">↺ この面をやり直す</button>
     <button class="act primary" id="nextBtn">🎲 次の面へ（新しい形）</button>
   </div>
@@ -53,7 +61,9 @@
   <canvas id="cv" width="880" height="660"></canvas>
 
   <p class="msg" id="msg"></p>
-  <p class="hint">ドラッグした方向・長さでショット（ガイド線が出ます）。離すと発射。<br>手球が落ちたらファウルで、手球だけ打ち直しになります。</p>
+  <p class="hint">ドラッグした方向・長さでショット（ガイド線が出ます）。離すと発射。<br>
+  フリーは順番なし（玉は全部おなじ色）。ナインボールは番号順 ― 最初に最小番号へ当てるのがルールで、外すとそのショットで落とした玉が戻るファウル。<br>
+  手球が落ちたらファウルで、手球だけ打ち直しになります。</p>
   <p class="seed" id="seedLine"></p>
 
   <footer><a href="https://naway0141-source.github.io/">← てまごりゲーム集にもどる</a></footer>
@@ -62,7 +72,7 @@
 <script>
 'use strict';
 /* ===== ルナーランダム =====
-   1面＝長方形固定、2面以降＝外形を完全ランダム生成（星型多角形）。
+   1面＝長方形固定、2面以降＝外形を完全ランダム生成（星型多角形＋曲線エッジ）。
    ロジック部（生成・物理）と描画・入力部を分離。 */
 
 // ---------- 共通ユーティリティ ----------
@@ -113,50 +123,81 @@ function polygonSimple(verts) {
 }
 
 // ---------- テーブル生成 ----------
-function buildWalls(verts, pockets) {
-  // ポケットのある頂点では隣接する辺を短くし、辺の途中ポケットでは辺を分割する
+// 壁は「輪郭点列（アウトライン）」から作る。ポケット位置では壁を欠く。
+// p.oIdx = アウトライン上の頂点ポケット位置、p.oSeg = 辺途中ポケットのある区間
+function buildWalls(outline, pockets) {
   const walls = [];
-  const n = verts.length;
-  const atVertex = new Set(pockets.filter(p => p.vertex !== undefined).map(p => p.vertex));
-  for (let i = 0; i < n; i++) {
-    const a = verts[i], b = verts[(i + 1) % n];
+  const m = outline.length;
+  const vPocket = new Set(), midPocket = new Map();
+  for (const p of pockets) {
+    if (p.oIdx !== undefined) vPocket.add(p.oIdx);
+    if (p.oSeg !== undefined) midPocket.set(p.oSeg, p);
+  }
+  for (let k = 0; k < m; k++) {
+    const a = outline[k], b = outline[(k + 1) % m];
     const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
+    if (len < 1) continue;
     const ux = dx / len, uy = dy / len;
-    const mid = pockets.find(p => p.edge === i);
-    const cuts = [];
-    let start = atVertex.has(i) ? POCKET_GAP : 0;
-    let end = atVertex.has((i + 1) % n) ? len - POCKET_GAP : len;
-    if (mid) {
-      cuts.push([start, mid.t * len - POCKET_GAP], [mid.t * len + POCKET_GAP, end]);
-    } else {
-      cuts.push([start, end]);
-    }
+    const start = vPocket.has(k) ? Math.min(POCKET_GAP, len * 0.45) : 0;
+    const end = vPocket.has((k + 1) % m) ? len - Math.min(POCKET_GAP, len * 0.45) : len;
+    const mid = midPocket.get(k);
+    const cuts = mid ? [[start, mid.t * len - POCKET_GAP], [mid.t * len + POCKET_GAP, end]] : [[start, end]];
     for (const [s, e] of cuts) {
-      if (e - s > 8) walls.push({ a: { x: a.x + ux * s, y: a.y + uy * s }, b: { x: a.x + ux * e, y: a.y + uy * e } });
+      if (e - s > 6) walls.push({ a: { x: a.x + ux * s, y: a.y + uy * s }, b: { x: a.x + ux * e, y: a.y + uy * e } });
     }
   }
   return walls;
 }
 
-function makeBalls(stage, verts, pockets, cuePos, objPositions) {
+function makeBalls(stage, outline, pockets, cuePos, objPositions) {
   const colors = ['#f7d038', '#2456d6', '#d92b2b', '#7b2d8b', '#f07d18', '#1d9e4b'];
   const balls = [{ x: cuePos.x, y: cuePos.y, vx: 0, vy: 0, cue: true, potted: false, color: '#f5f2e8', num: 0 }];
   objPositions.forEach((p, i) => balls.push({ x: p.x, y: p.y, vx: 0, vy: 0, cue: false, potted: false, color: colors[i], num: i + 1 }));
-  return { stage, verts, pockets, walls: buildWalls(verts, pockets), balls, shots: 0, cleared: false, scratched: false };
+  return {
+    stage, verts: outline, pockets, walls: buildWalls(outline, pockets), balls,
+    shots: 0, cleared: false, scratched: false,
+    shotTaken: false, shotTarget: null, firstContact: null, shotPotted: []
+  };
 }
 
 function stageOne() {
   const verts = [{ x: 110, y: 90 }, { x: 770, y: 90 }, { x: 770, y: 570 }, { x: 110, y: 570 }];
   const pockets = [
-    { x: 110, y: 90, vertex: 0 }, { x: 770, y: 90, vertex: 1 },
-    { x: 770, y: 570, vertex: 2 }, { x: 110, y: 570, vertex: 3 },
-    { x: 440, y: 90, edge: 0, t: 0.5 }, { x: 440, y: 570, edge: 2, t: 0.5 }
+    { x: 110, y: 90, oIdx: 0 }, { x: 770, y: 90, oIdx: 1 },
+    { x: 770, y: 570, oIdx: 2 }, { x: 110, y: 570, oIdx: 3 },
+    { x: 440, y: 90, oSeg: 0, t: 0.5 }, { x: 440, y: 570, oSeg: 2, t: 0.5 }
   ];
   const objs = [
     { x: 600, y: 330 }, { x: 632, y: 311 }, { x: 632, y: 349 },
     { x: 664, y: 292 }, { x: 664, y: 330 }, { x: 664, y: 368 }
   ];
   return makeBalls(1, verts, pockets, { x: 250, y: 330 }, objs);
+}
+
+// 基本多角形の辺の一部を放物線状に膨らませて曲線エッジにする。
+// 戻り値： アウトライン点列と、基本頂点→アウトライン添字の対応表
+function densifyOutline(verts, pockets, rnd) {
+  const n = verts.length;
+  const gx = verts.reduce((s, v) => s + v.x, 0) / n, gy = verts.reduce((s, v) => s + v.y, 0) / n;
+  const midEdges = new Set(pockets.filter(p => p.edge !== undefined).map(p => p.edge));
+  const outline = [], vIdx = [];
+  for (let i = 0; i < n; i++) {
+    const a = verts[i], b = verts[(i + 1) % n];
+    vIdx.push(outline.length);
+    outline.push({ x: a.x, y: a.y });
+    const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
+    if (midEdges.has(i) || len <= 120 || rnd() >= 0.5) continue; // 直線のまま
+    let nx = -dy / len, ny = dx / len;
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    if ((mx - gx) * nx + (my - gy) * ny < 0) { nx = -nx; ny = -ny; } // 法線を外向きに
+    const sag = len * (0.10 + rnd() * 0.13) * (rnd() < 0.72 ? 1 : -1); // 外膨らみ多め、たまに内側
+    const K = clamp(Math.round(len / 15), 5, 24);
+    for (let k = 1; k < K; k++) {
+      const s = k / K, h = sag * 4 * s * (1 - s);
+      outline.push({ x: a.x + dx * s + nx * h, y: a.y + dy * s + ny * h });
+    }
+  }
+  return { outline, vIdx };
 }
 
 // ランダム外形：中心から見て星型になる多角形（角度ソート済みの放射状生成）
@@ -173,7 +214,6 @@ function genRandomVerts(rnd) {
       cur = clamp(cur + (rnd() - 0.5) * 0.52, 0.62, 1.0);
       s.push(cur);
     }
-    // 隣接する半径比を滑らかに（2周なじませる）
     for (let pass = 0; pass < 2; pass++) {
       for (let i = 0; i < n; i++) {
         const prev = s[(i + n - 1) % n];
@@ -185,19 +225,17 @@ function genRandomVerts(rnd) {
       const t = baseRot + i * step + (rnd() - 0.5) * step * 0.66;
       verts.push({ x: cx + Math.cos(t) * 355 * s[i], y: cy + Math.sin(t) * 262 * s[i] });
     }
-    // 検証：辺の長さ・角の鋭さ・自己交差
     let okShape = polygonSimple(verts);
     for (let i = 0; i < n && okShape; i++) {
       const a = verts[i], b = verts[(i + 1) % n], c = verts[(i + 2) % n];
-      const e1 = Math.hypot(b.x - a.x, b.y - a.y), e2 = Math.hypot(c.x - b.x, c.y - b.y);
+      const e1 = Math.hypot(b.x - a.x, b.y - a.y);
       if (e1 < 85 || e1 > 480) okShape = false;
       const v1x = a.x - b.x, v1y = a.y - b.y, v2x = c.x - b.x, v2y = c.y - b.y;
       const ang = Math.acos(clamp((v1x * v2x + v1y * v2y) / (Math.hypot(v1x, v1y) * Math.hypot(v2x, v2y)), -1, 1));
-      if (ang < 0.55) okShape = false; // 針状・ hairline の入り江を禁止
+      if (ang < 0.55) okShape = false;
     }
     if (okShape) return verts;
   }
-  // フォールバック：ほぼ正多角形（必ず成立する）
   const n = 8, verts = [], rot = rnd() * Math.PI;
   for (let i = 0; i < n; i++) {
     const t = rot + i * Math.PI * 2 / n;
@@ -208,50 +246,66 @@ function genRandomVerts(rnd) {
 
 function genRandomStage(stageNo, seed) {
   const rnd = mulberry32(seed);
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const verts = genRandomVerts(rnd);
+    const n = verts.length;
+    // ポケット候補：頂点（隣り合わないよう間引く）＋長い辺の途中
+    const order = [...Array(n).keys()];
+    for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+    const chosen = [];
+    for (const idx of order) {
+      if (chosen.length >= 6) break;
+      if (chosen.some(c => Math.min((c - idx + n) % n, (idx - c + n) % n) <= 1)) continue;
+      chosen.push(idx);
+    }
+    if (chosen.length < 5) {
+      for (const idx of order) { if (chosen.length >= 5) break; if (!chosen.includes(idx)) chosen.push(idx); }
+    }
+    const basePockets = chosen.map(idx => ({ x: verts[idx].x, y: verts[idx].y, vertex: idx }));
+    for (let i = 0; i < n && basePockets.length < 8; i++) {
+      const a = verts[i], b = verts[(i + 1) % n];
+      if (Math.hypot(b.x - a.x, b.y - a.y) > 300 && rnd() < 0.7) {
+        basePockets.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, edge: i, t: 0.5 });
+      }
+    }
+    // 曲線化してアウトラインを作る。自己交差したらこの試行は破棄
+    const { outline, vIdx } = densifyOutline(verts, basePockets, rnd);
+    if (!polygonSimple(outline)) continue;
+    const pockets = basePockets.map(p => p.vertex !== undefined
+      ? { x: p.x, y: p.y, oIdx: vIdx[p.vertex] }
+      : { x: p.x, y: p.y, oSeg: vIdx[p.edge], t: p.t });
+    // 球の配置（アウトライン基準の棄却サンプリング）
+    const edges = outline.map((v, i) => [v, outline[(i + 1) % outline.length]]);
+    const clearOf = (x, y, balls, minEdge, minPocket, minBall) => {
+      if (!pointInPolygon(x, y, outline)) return false;
+      for (const [a, b] of edges) if (distToSeg(x, y, a, b).d < minEdge) return false;
+      for (const p of pockets) if (Math.hypot(x - p.x, y - p.y) < minPocket) return false;
+      for (const o of balls) if (Math.hypot(x - o.x, y - o.y) < minBall) return false;
+      return true;
+    };
+    const gx = verts.reduce((s, v) => s + v.x, 0) / n, gy = verts.reduce((s, v) => s + v.y, 0) / n;
+    let cue = null;
+    for (let k = 0; k < 400 && !cue; k++) {
+      const x = gx + (rnd() - 0.5) * 60, y = gy + (rnd() - 0.5) * 60;
+      if (clearOf(x, y, [], 44, 52, 0)) cue = { x, y };
+    }
+    if (!cue) cue = { x: gx, y: gy };
+    const objs = [];
+    for (let k = 0; k < 3000 && objs.length < 6; k++) {
+      const x = 70 + rnd() * (FIELD_W - 140), y = 70 + rnd() * (FIELD_H - 140);
+      if (Math.hypot(x - cue.x, y - cue.y) < 56) continue;
+      if (clearOf(x, y, objs, BALL_R + 15, POCKET_R + 18, BALL_R * 2 + 7)) objs.push({ x, y });
+    }
+    if (objs.length === 6) return makeBalls(stageNo, outline, pockets, cue, objs);
+  }
+  // 最終フォールバック：曲線なしの素直な面
   const verts = genRandomVerts(rnd);
   const n = verts.length;
-  // ポケット：頂点から（隣り合わないよう間引く）＋長い辺の途中
-  const order = [...Array(n).keys()];
-  for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
-  const chosen = [];
-  for (const idx of order) {
-    if (chosen.length >= 6) break;
-    if (chosen.some(c => Math.min((c - idx + n) % n, (idx - c + n) % n) <= 1)) continue;
-    chosen.push(idx);
-  }
-  if (chosen.length < 5) { // 間引きで不足したら隣接を許して補充
-    for (const idx of order) { if (chosen.length >= 5) break; if (!chosen.includes(idx)) chosen.push(idx); }
-  }
-  const pockets = chosen.map(idx => ({ x: verts[idx].x, y: verts[idx].y, vertex: idx }));
-  for (let i = 0; i < n && pockets.length < 8; i++) {
-    const a = verts[i], b = verts[(i + 1) % n];
-    if (Math.hypot(b.x - a.x, b.y - a.y) > 300 && rnd() < 0.7) {
-      pockets.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, edge: i, t: 0.5 });
-    }
-  }
-  const edges = verts.map((v, i) => [v, verts[(i + 1) % n]]);
-  const clearOf = (x, y, balls, minEdge, minPocket, minBall) => {
-    if (!pointInPolygon(x, y, verts)) return false;
-    for (const [a, b] of edges) if (distToSeg(x, y, a, b).d < minEdge) return false;
-    for (const p of pockets) if (Math.hypot(x - p.x, y - p.y) < minPocket) return false;
-    for (const o of balls) if (Math.hypot(x - o.x, y - o.y) < minBall) return false;
-    return true;
-  };
-  // 手球は重心付近、的球はランダム配置（すべて棄却サンプリング）
+  const pockets = verts.slice(0, 6).map((v, i) => ({ x: v.x, y: v.y, oIdx: i }));
   const gx = verts.reduce((s, v) => s + v.x, 0) / n, gy = verts.reduce((s, v) => s + v.y, 0) / n;
-  let cue = null;
-  for (let k = 0; k < 400 && !cue; k++) {
-    const x = gx + (rnd() - 0.5) * 60, y = gy + (rnd() - 0.5) * 60;
-    if (clearOf(x, y, [], 44, 52, 0)) cue = { x, y };
-  }
-  if (!cue) cue = { x: gx, y: gy };
   const objs = [];
-  for (let k = 0; k < 3000 && objs.length < 6; k++) {
-    const x = 70 + rnd() * (FIELD_W - 140), y = 70 + rnd() * (FIELD_H - 140);
-    if (Math.hypot(x - cue.x, y - cue.y) < 56) continue;
-    if (clearOf(x, y, objs, BALL_R + 15, POCKET_R + 18, BALL_R * 2 + 7)) objs.push({ x, y });
-  }
-  return makeBalls(stageNo, verts, pockets, cue, objs);
+  for (let i = 0; i < 6; i++) objs.push({ x: gx + 130 * Math.cos(i * 1.05), y: gy + 95 * Math.sin(i * 1.05) });
+  return makeBalls(stageNo, verts, pockets, { x: gx, y: gy }, objs);
 }
 
 function findFreeSpot(state) {
@@ -284,17 +338,16 @@ function stepPhysics(st, dt, fric) {
     b.vx *= damp; b.vy *= damp;
     if (Math.hypot(b.vx, b.vy) < 4) { b.vx = 0; b.vy = 0; }
   }
-  // ポケット
   for (const b of balls) {
     for (const p of st.pockets) {
       if (Math.hypot(b.x - p.x, b.y - p.y) < CAPTURE_R) {
         b.potted = true; b.vx = 0; b.vy = 0;
         if (b.cue) st.scratched = true;
+        else if (st.shotTaken) st.shotPotted.push(b.num);
         break;
       }
     }
   }
-  // 壁
   for (const b of balls) {
     if (b.potted) continue;
     for (const w of st.walls) {
@@ -307,7 +360,6 @@ function stepPhysics(st, dt, fric) {
       }
     }
   }
-  // 球同士
   for (let i = 0; i < balls.length; i++) {
     for (let j = i + 1; j < balls.length; j++) {
       const A = balls[i], B = balls[j];
@@ -319,6 +371,10 @@ function stepPhysics(st, dt, fric) {
         B.x += nx * push; B.y += ny * push;
         const rvn = (B.vx - A.vx) * nx + (B.vy - A.vy) * ny;
         if (rvn < 0) {
+          if (st.firstContact === null && st.shotTaken) {
+            if (A.cue && !B.cue) st.firstContact = B.num;
+            else if (B.cue && !A.cue) st.firstContact = A.num;
+          }
           const imp = -0.975 * rvn;
           A.vx -= imp * nx; A.vy -= imp * ny;
           B.vx += imp * nx; B.vy += imp * ny;
@@ -329,14 +385,19 @@ function stepPhysics(st, dt, fric) {
 }
 function allStopped(st) { return st.balls.every(b => b.potted || (b.vx === 0 && b.vy === 0)); }
 function remaining(st) { return st.balls.filter(b => !b.cue && !b.potted).length; }
+function targetOf(st) {
+  const nums = st.balls.filter(b => !b.cue && !b.potted).map(b => b.num);
+  return nums.length ? Math.min(...nums) : null;
+}
 
 // ---------- 描画・入力部（ブラウザのみ） ----------
 if (typeof document !== 'undefined' && document.getElementById('cv')) {
   const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
   const $ = id => document.getElementById(id);
-  let stage = 1, seed = 1;
+  const CIRCLED = ['①', '②', '③', '④', '⑤', '⑥'];
+  let stage = 1, seed = 1, mode = 'free';
   let S = stageOne();
-  let fric = 32, drag = null, running = false, AC = null;
+  let fric = 32, drag = null, AC = null;
 
   const stars = [];
   { const r = mulberry32(42); for (let i = 0; i < 130; i++) stars.push({ x: r() * FIELD_W, y: r() * FIELD_H, s: r() * 1.6 + 0.4, p: r() * 6.28 }); }
@@ -359,7 +420,6 @@ if (typeof document !== 'undefined' && document.getElementById('cv')) {
     stage = no; seed = sd;
     S = no === 1 ? stageOne() : genRandomStage(no, sd);
     $('stageNo').textContent = no;
-    $('shots').textContent = '0';
     $('msg').textContent = '';
     $('seedLine').textContent = no === 1 ? 'STAGE 1 は定番の長方形テーブル' : 'STAGE ' + no + ' ／ テーブルシード ' + sd;
     updateHud();
@@ -367,6 +427,9 @@ if (typeof document !== 'undefined' && document.getElementById('cv')) {
   function updateHud() {
     $('left').textContent = remaining(S);
     $('shots').textContent = S.shots;
+    const t = targetOf(S);
+    $('targetStat').style.display = mode === 'order' ? '' : 'none';
+    if (t) $('target').textContent = CIRCLED[t - 1];
   }
 
   function tablePath() {
@@ -375,22 +438,34 @@ if (typeof document !== 'undefined' && document.getElementById('cv')) {
     ctx.closePath();
   }
   function drawBall(b) {
-    const g = ctx.createRadialGradient(b.x - 4, b.y - 4, 2, b.x, b.y, BALL_R + 1);
-    g.addColorStop(0, '#ffffff'); g.addColorStop(0.25, b.color); g.addColorStop(1, b.color);
-    ctx.fillStyle = b.cue ? '#f5f2e8' : g;
-    ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, 6.29); ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.stroke();
     if (b.cue) {
+      ctx.fillStyle = '#f5f2e8';
+      ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, 6.29); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.stroke();
       ctx.fillStyle = 'rgba(120,120,130,.5)';
       ctx.beginPath(); ctx.arc(b.x - 3.5, b.y + 2, 2.2, 0, 6.29); ctx.fill();
       ctx.beginPath(); ctx.arc(b.x + 3, b.y - 3.5, 1.6, 0, 6.29); ctx.fill();
-    } else {
-      ctx.fillStyle = '#fff';
-      ctx.beginPath(); ctx.arc(b.x, b.y, 5.6, 0, 6.29); ctx.fill();
-      ctx.fillStyle = '#111'; ctx.font = 'bold 8.5px sans-serif';
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(b.num, b.x, b.y + 0.5);
+      return;
     }
+    if (mode === 'free') {
+      // フリー：番号なし・全部おなじ色のタマ
+      const g = ctx.createRadialGradient(b.x - 4, b.y - 4, 2, b.x, b.y, BALL_R + 1);
+      g.addColorStop(0, '#ffe9b0'); g.addColorStop(0.35, '#e8a33d'); g.addColorStop(1, '#b97a1e');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, 6.29); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.stroke();
+      return;
+    }
+    const g = ctx.createRadialGradient(b.x - 4, b.y - 4, 2, b.x, b.y, BALL_R + 1);
+    g.addColorStop(0, '#ffffff'); g.addColorStop(0.25, b.color); g.addColorStop(1, b.color);
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, 6.29); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(b.x, b.y, 5.6, 0, 6.29); ctx.fill();
+    ctx.fillStyle = '#111'; ctx.font = 'bold 8.5px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(b.num, b.x, b.y + 0.5);
   }
   function aimGuide() {
     if (!drag || S.cleared) return null;
@@ -401,7 +476,6 @@ if (typeof document !== 'undefined' && document.getElementById('cv')) {
     if (len < 8) return null;
     const ux = dx / len, uy = dy / len;
     const power = clamp(len / 260, 0, 1);
-    // レイキャスト：壁と球への最接近ヒット
     let bestT = 1400, hitBall = null;
     for (const w of S.walls) {
       const ex = w.b.x - w.a.x, ey = w.b.y - w.a.y;
@@ -434,14 +508,12 @@ if (typeof document !== 'undefined' && document.getElementById('cv')) {
       ctx.fillRect(st.x, st.y, st.s, st.s);
     }
     ctx.globalAlpha = 1;
-    // テーブル（縁→フェルト）
     tablePath();
     ctx.strokeStyle = '#5b6474'; ctx.lineWidth = 26; ctx.lineJoin = 'round'; ctx.stroke();
     const fg = ctx.createRadialGradient(FIELD_W / 2, FIELD_H / 2, 80, FIELD_W / 2, FIELD_H / 2, 520);
     fg.addColorStop(0, '#2c3a63'); fg.addColorStop(1, '#1a2342');
     ctx.fillStyle = fg; ctx.fill();
     ctx.strokeStyle = 'rgba(255,255,255,.18)'; ctx.lineWidth = 2; ctx.stroke();
-    // ポケット（ブラックホール）
     for (const p of S.pockets) {
       ctx.save();
       ctx.shadowColor = 'rgba(150,90,255,.9)'; ctx.shadowBlur = 16;
@@ -451,7 +523,19 @@ if (typeof document !== 'undefined' && document.getElementById('cv')) {
       ctx.strokeStyle = 'rgba(190,160,255,.55)'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(p.x, p.y, POCKET_R - 2, 0, 6.29); ctx.stroke();
     }
-    // 照準ガイド
+    // ナインボール：次の的を金リングで表示
+    if (mode === 'order' && !S.cleared && allStopped(S)) {
+      const t = targetOf(S);
+      const tb = S.balls.find(b => b.num === t);
+      if (tb && !tb.potted) {
+        ctx.strokeStyle = '#ffd76a'; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(tb.x, tb.y, BALL_R + 5 + 1.6 * Math.sin(now * 0.006), 0, 6.29); ctx.stroke();
+        ctx.fillStyle = '#ffd76a';
+        ctx.beginPath();
+        ctx.moveTo(tb.x - 6, tb.y - BALL_R - 16); ctx.lineTo(tb.x + 6, tb.y - BALL_R - 16); ctx.lineTo(tb.x, tb.y - BALL_R - 8);
+        ctx.closePath(); ctx.fill();
+      }
+    }
     const aim = aimGuide();
     if (aim && allStopped(S)) {
       const gx = aim.cue.x + aim.ux * aim.hitT, gy = aim.cue.y + aim.uy * aim.hitT;
@@ -467,7 +551,6 @@ if (typeof document !== 'undefined' && document.getElementById('cv')) {
         ctx.strokeStyle = 'rgba(255,215,106,.9)'; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(b.x + nx * 34, b.y + ny * 34); ctx.stroke();
       }
-      // パワーゲージ
       ctx.fillStyle = 'rgba(255,255,255,.15)'; ctx.fillRect(FIELD_W - 26, 120, 10, 220);
       ctx.fillStyle = aim.power > 0.85 ? '#ff6b6b' : '#ffd76a';
       ctx.fillRect(FIELD_W - 26, 120 + 220 * (1 - aim.power), 10, 220 * aim.power);
@@ -483,7 +566,7 @@ if (typeof document !== 'undefined' && document.getElementById('cv')) {
     }
   }
 
-  let lastT = 0, acc = 0, wasMoving = false;
+  let lastT = 0, acc = 0;
   function frame(ts) {
     requestAnimationFrame(frame);
     const now = ts || 0;
@@ -492,26 +575,42 @@ if (typeof document !== 'undefined' && document.getElementById('cv')) {
       acc += dt;
       const h = 1 / 240;
       while (acc > h) { stepPhysics(S, h, fric); acc -= h; }
-      if (allStopped(S)) {
-        // ショット終了時の処理
-        if (remaining(S) === 0 && !S.cleared) {
-          S.cleared = true;
-          $('msg').textContent = '🎉 クリア！ ' + S.shots + 'ショット';
-          [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => blip(f, 0.15, 'triangle', 0.09), i * 100));
-        } else if (S.scratched) {
-          const cue = S.balls[0];
-          const spot = findFreeSpot(S);
-          cue.x = spot.x; cue.y = spot.y; cue.potted = false; cue.vx = 0; cue.vy = 0;
-          S.scratched = false;
-          $('msg').textContent = '💫 手球が落ちた…打ち直し';
-          blip(160, 0.25, 'sawtooth', 0.1);
-        } else {
-          $('msg').textContent = '';
-        }
-        updateHud();
-      }
+      if (allStopped(S)) onShotEnd();
     }
     draw(now);
+  }
+  function onShotEnd() {
+    let foulMsg = '';
+    if (mode === 'order' && S.shotTaken) {
+      const wrongFirst = S.firstContact !== null && S.firstContact !== S.shotTarget;
+      const whiff = S.firstContact === null;
+      if (wrongFirst || whiff) {
+        for (const num of S.shotPotted) {
+          const b = S.balls.find(x => x.num === num);
+          if (!b) continue;
+          const spot = findFreeSpot(S);
+          b.x = spot.x; b.y = spot.y; b.potted = false; b.vx = 0; b.vy = 0;
+        }
+        foulMsg = whiff ? '💫 ファウル！ どの玉にも当たらなかった' : '💫 ファウル！ 最初に当てるのは ' + S.shotTarget + ' 番';
+        blip(150, 0.25, 'sawtooth', 0.1);
+      }
+    }
+    S.shotTaken = false; S.shotPotted = []; S.firstContact = null;
+    if (remaining(S) === 0 && !S.cleared) {
+      S.cleared = true;
+      $('msg').textContent = '🎉 クリア！ ' + S.shots + 'ショット';
+      [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => blip(f, 0.15, 'triangle', 0.09), i * 100));
+    } else if (S.scratched) {
+      const cue = S.balls[0];
+      const spot = findFreeSpot(S);
+      cue.x = spot.x; cue.y = spot.y; cue.potted = false; cue.vx = 0; cue.vy = 0;
+      S.scratched = false;
+      $('msg').textContent = foulMsg ? foulMsg + '（手球も打ち直し）' : '💫 手球が落ちた…打ち直し';
+      blip(160, 0.25, 'sawtooth', 0.1);
+    } else {
+      $('msg').textContent = foulMsg;
+    }
+    updateHud();
   }
   requestAnimationFrame(frame);
 
@@ -538,6 +637,10 @@ if (typeof document !== 'undefined' && document.getElementById('cv')) {
     if (!aim || aim.power < 0.05) return;
     const cue = S.balls[0];
     const sp = 200 + aim.power * 1050;
+    S.shotTarget = targetOf(S);
+    S.firstContact = null;
+    S.shotPotted = [];
+    S.shotTaken = true;
     cue.vx = aim.ux * sp; cue.vy = aim.uy * sp;
     S.shots++;
     $('msg').textContent = '';
@@ -547,6 +650,12 @@ if (typeof document !== 'undefined' && document.getElementById('cv')) {
   cv.addEventListener('pointercancel', () => { drag = null; });
 
   $('fric').addEventListener('input', e => { fric = +e.target.value; $('fricVal').textContent = fric; });
+  $('modeSeg').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b || b.dataset.m === mode) return;
+    [...$('modeSeg').children].forEach(x => x.classList.toggle('on', x === b));
+    mode = b.dataset.m;
+    newStage(stage, seed);
+  });
   $('retryBtn').addEventListener('click', () => newStage(stage, seed));
   $('nextBtn').addEventListener('click', () => {
     const ns = Math.floor(Math.random() * 899999) + 100000;
