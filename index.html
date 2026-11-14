@@ -6,6 +6,7 @@
 <title>ルナーランダム｜毎回ちがう形の月面ビリヤード</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { overscroll-behavior:none; }
   body {
     font-family:"Hiragino Maru Gothic ProN","Hiragino Sans","Noto Sans JP",sans-serif;
     background:radial-gradient(1000px 600px at 70% -10%, #1b2340 0%, #0a0d1d 55%, #05060f 100%);
@@ -620,6 +621,7 @@ if (typeof document !== 'undefined' && document.getElementById('cv')) {
   }
   cv.addEventListener('pointerdown', e => {
     if (!allStopped(S) || S.cleared) return;
+    e.preventDefault();
     audio();
     const p = toField(e);
     drag = { sx: p.x, sy: p.y, cx: p.x, cy: p.y };
@@ -627,9 +629,14 @@ if (typeof document !== 'undefined' && document.getElementById('cv')) {
   });
   cv.addEventListener('pointermove', e => {
     if (!drag) return;
+    e.preventDefault();
     const p = toField(e);
     drag.cx = p.x; drag.cy = p.y;
   });
+  // iOS Safari では touch-action だけでは画面スクロールが止まらないことがあるため、
+  // キャンバス上のタッチスクロールを明示的に止める
+  cv.addEventListener('touchstart', e => { e.preventDefault(); }, { passive: false });
+  cv.addEventListener('touchmove', e => { e.preventDefault(); }, { passive: false });
   cv.addEventListener('pointerup', e => {
     if (!drag) return;
     const aim = aimGuide();
